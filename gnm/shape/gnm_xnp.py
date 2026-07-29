@@ -630,7 +630,17 @@ class GNM(gnm_base.GNMBase):
     )
 
   def prune_vertices(self, keep_vertices: enpt.IntArray['V_pruned']) -> None:
-    """Prunes model vertices in-place."""
+    """Prunes model vertices in-place.
+
+    Every array indexed by vertices or by faces is pruned so that the model
+    stays internally consistent. Quads and triangles referencing a removed
+    vertex are dropped together with their UV coordinates, and the vertex
+    groups, the joint regressor and the mirror indices are restricted to the
+    kept vertices. Mirror indices whose counterpart was removed are set to -1.
+
+    Args:
+      keep_vertices: The indices of the vertices to keep, (V_pruned,).
+    """
     xnp = self.xnp
     num_vertices = self.num_vertices
     keep_vertices = xnp.asarray(keep_vertices, dtype=xnp.int32)
@@ -665,6 +675,43 @@ class GNM(gnm_base.GNMBase):
         triangles, triangle_indices, axis=0, xnp=xnp
     )
 
+    # UV coordinates are stored per face, so they follow the surviving faces.
+    if self.quad_uvs is not None:
+      self.quad_uvs = gnm_common.take(
+          self.quad_uvs, quad_indices, axis=0, xnp=xnp
+      )
+    if self.triangle_uvs is not None:
+      self.triangle_uvs = gnm_common.take(
+          self.triangle_uvs, triangle_indices, axis=0, xnp=xnp
+      )
+
+    # Arrays whose trailing axis indexes the vertices.
+    if self.vertex_groups is not None:
+      self.vertex_groups = gnm_common.take(
+          self.vertex_groups, keep_vertices, axis=1, xnp=xnp
+      )
+    if self.joint_regressor is not None:
+      self.joint_regressor = gnm_common.take(
+          self.joint_regressor, keep_vertices, axis=1, xnp=xnp
+      )
+
+    # Mirror indices must be pruned *and* remapped, since they store vertex
+    # indices. Vertices whose counterpart was removed are marked with -1.
+    if self.mirror_indices is not None:
+      kept_mirror_indices = gnm_common.take(
+          self.mirror_indices, keep_vertices, axis=0, xnp=xnp
+      )
+      # Entries may already be unset if the model was pruned before. Look them
+      # up at index 0 so they do not wrap around, then restore the -1 marker.
+      is_set = kept_mirror_indices >= 0
+      remapped = gnm_common.take(
+          mapper,
+          xnp.where(is_set, kept_mirror_indices, 0),
+          axis=0,
+          xnp=xnp,
+      )
+      self.mirror_indices = xnp.where(is_set, remapped, -1)
+
     if self.pose_correctives_regressor is not None:
       pose_correctives = xnp.reshape(
           self.pose_correctives_regressor,
@@ -676,6 +723,10 @@ class GNM(gnm_base.GNMBase):
       self.pose_correctives_regressor = xnp.reshape(
           pose_correctives, (-1, keep_vertices.shape[0] * 3)
       )
+
+    # Invalidate the cached properties derived from the pruned arrays.
+    for cached_property_name in ('edge_list', 'vertex_uvs'):
+      self.__dict__.pop(cached_property_name, None)
 
 
 def _check_batch_dims(

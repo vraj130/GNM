@@ -319,6 +319,19 @@ class GNMTensorflowTest(parameterized.TestCase):
     with self.subTest('Test triangle indices correct'):
       triangle_indices = set(gnm_pruned.triangles.numpy().flatten().tolist())
       self.assertSetEqual(triangle_indices, {0, 1, 2, 3})
+    with self.subTest('Test UVs stay aligned with the faces'):
+      self.assertEqual(gnm_pruned.quad_uvs.shape[:2], gnm_pruned.quads.shape)
+      self.assertEqual(
+          gnm_pruned.triangle_uvs.shape[:2], gnm_pruned.triangles.shape
+      )
+    with self.subTest('Test per-vertex arrays are pruned'):
+      self.assertEqual(
+          gnm_pruned.vertex_groups.shape[-1], gnm_pruned.num_vertices
+      )
+      self.assertEqual(
+          gnm_pruned.joint_regressor.shape[-1], gnm_pruned.num_vertices
+      )
+      self.assertLen(gnm_pruned.mirror_indices, gnm_pruned.num_vertices)
     with self.subTest('Test vertex positions'):
       tf.debugging.assert_near(vertices_pruned, vertices_gathered)
 

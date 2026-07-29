@@ -513,6 +513,98 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+      variant=tuple(_SUPPORTED_VARIANTS),
+  )
+  def test_prune_vertices_keeps_model_consistent(
+      self, version: str, variant: str
+  ):
+    """Checks that pruning keeps per-vertex and per-face arrays in sync."""
+    if variant not in self.gnms[version]:
+      self.skipTest(f'variant {variant} not supported in {version}.')
+    gnm_np = self.gnms[version][variant]
+    gnm_pruned = copy.deepcopy(gnm_np)
+
+    # Populate the cached properties to check that they get invalidated.
+    _ = gnm_pruned.edge_list
+    _ = gnm_pruned.vertex_uvs
+
+    keep_vertices = gnm_np.vertex_group_indices('skin')
+    gnm_pruned.prune_vertices(keep_vertices)
+
+    with self.subTest('UVs stay aligned with the faces'):
+      self.assertEqual(gnm_pruned.quad_uvs.shape[:2], gnm_pruned.quads.shape)
+      self.assertEqual(
+          gnm_pruned.triangle_uvs.shape[:2], gnm_pruned.triangles.shape
+      )
+      kept_quads = np.where(
+          np.all(np.isin(gnm_np.quads, keep_vertices), axis=-1)
+      )[0]
+      np.testing.assert_allclose(
+          gnm_pruned.quad_uvs, gnm_np.quad_uvs[kept_quads]
+      )
+
+    with self.subTest('Per-vertex arrays are pruned'):
+      self.assertEqual(
+          gnm_pruned.vertex_groups.shape,
+          (len(gnm_np.vertex_group_names), gnm_pruned.num_vertices),
+      )
+      self.assertEqual(
+          gnm_pruned.joint_regressor.shape,
+          (gnm_pruned.num_joints, gnm_pruned.num_vertices),
+      )
+      self.assertLen(gnm_pruned.mirror_indices, gnm_pruned.num_vertices)
+
+    with self.subTest('Vertex groups still select the same vertices'):
+      group_indices = gnm_pruned.vertex_group_indices('upper_lip')
+      np.testing.assert_array_equal(
+          keep_vertices[group_indices],
+          np.intersect1d(
+              gnm_np.vertex_group_indices('upper_lip'), keep_vertices
+          ),
+      )
+
+    with self.subTest('Cached properties are invalidated'):
+      self.assertLess(gnm_pruned.edge_list.max(), gnm_pruned.num_vertices)
+      self.assertEqual(
+          gnm_pruned.vertex_uvs.shape, (gnm_pruned.num_vertices, 2)
+      )
+
+    with self.subTest('Mirror indices are remapped'):
+      mirror_indices = gnm_pruned.mirror_indices
+      self.assertTrue(np.all(mirror_indices >= 0))
+      np.testing.assert_array_equal(
+          mirror_indices[mirror_indices], np.arange(gnm_pruned.num_vertices)
+      )
+
+    # Pruning to a single side drops the mirror counterpart of every off-center
+    # vertex; only the self-mirrored vertices on the symmetry plane keep one.
+    gnm_pruned.prune_vertices(gnm_pruned.vertex_group_indices('left'))
+    with self.subTest('Vertices without a counterpart have no mirror index'):
+      self.assertEqual(gnm_pruned.quad_uvs.shape[:2], gnm_pruned.quads.shape)
+      mirror_indices = gnm_pruned.mirror_indices
+      paired = np.where(mirror_indices >= 0)[0]
+      self.assertNotEmpty(np.where(mirror_indices < 0)[0])
+      np.testing.assert_array_equal(
+          mirror_indices[mirror_indices[paired]], paired
+      )
+
+    # Pruning again must leave the vertices that already lost their counterpart
+    # unset, rather than wrapping their -1 around to the last vertex. The last
+    # vertex is deliberately kept, so a wrapped lookup would yield a valid but
+    # wrong index instead of failing loudly.
+    mirror_indices_before = gnm_pruned.mirror_indices.copy()
+    keep_vertices = np.arange(
+        gnm_pruned.num_vertices // 2, gnm_pruned.num_vertices
+    )
+    gnm_pruned.prune_vertices(keep_vertices)
+    with self.subTest('Pruning a pruned model preserves unset mirror indices'):
+      mirror_indices = gnm_pruned.mirror_indices
+      was_unset = mirror_indices_before[keep_vertices] < 0
+      self.assertNotEmpty(np.where(was_unset)[0])
+      self.assertTrue(np.all(mirror_indices[was_unset] < 0))
+
+  @parameterized.product(
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
           v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
       ),
